@@ -6,7 +6,10 @@
             [manifold.stream :as s]
             [manifold.deferred :as d])
   (:import (java.io InputStream)
-           (java.nio.file Files Path StandardCopyOption)
+           (java.nio.file Files LinkOption Path StandardCopyOption)
+           (java.nio.file.attribute FileAttribute)
+           (java.time LocalDate)
+           (java.time.format DateTimeFormatter)
            (java.util.concurrent Executors)
            (java.util.zip ZipInputStream)))
 
@@ -96,6 +99,19 @@
   [url]
   (http/get url {:as :stream}))
 
+(defn str->date
+  ([date] (LocalDate/parse date))
+  ([date fmt] (LocalDate/parse date (DateTimeFormatter/ofPattern fmt))))
+
+(defn parse-name->yyyy-mm-dd
+  "Return a map consisting of the file-name and the date found in the name."
+  [^String file-name]
+  (when file-name
+    (let [[_ date] (re-find #"(\d{4}-\d{2}-\d{2})" file-name)]
+      (when date
+        {:file-name file-name
+         :date      (str->date date)}))))
+
 (defn tag-ends-with?
   "Helper function to parse the tags of Binance's XML responses."
   [suffix]
@@ -145,9 +161,22 @@
         (recur links @(get-data-with-params
                         (prefix-marker-params prefix next-marker)))))))
 
+(defn is-dir? [dir]
+  (Files/isDirectory
+    (Path/of dir (into-array String []))
+    (into-array LinkOption [])))
+
+(defn create-dir [dir]
+  (let [path (Path/of dir (into-array String []))
+        attr-arr (into-array FileAttribute [])]
+    (try
+      (Files/createDirectory path attr-arr)
+      (catch Exception e
+        (println "Couldn't make a single directory for" dir ". Attempting to create all parent directories.")
+        (Files/createDirectories path attr-arr)
+        ))))
 
 ;; TODO add predicate(s) to determine which ZipEntry to save/copy
-;; TODO validate dir exists
 (defn save-byte-input-stream
   "Blindly save files from the zip to some directory."
   [byte-stream dir]
@@ -155,41 +184,40 @@
     (loop []
       (when-let [entry (.getNextEntry stream)]
         (let [name (last (str/split (.getName entry) #"/"))
-              path (Path/of (if dir
-                              dir
-                              (System/getProperty "user.dir"))
-                            (into-array String [name]))]
+              dir (or dir (System/getProperty "user.dir"))
+              path (Path/of dir (into-array String [name]))]
+          (if-not (is-dir? dir)
+            (create-dir dir))
           (Files/copy stream path (into-array StandardCopyOption [StandardCopyOption/REPLACE_EXISTING]))
           (recur))))))
 
-(defn process-download-request [resp dir]
-  (let [{:keys [status body error]} resp]
-    (if error
-      (println "Failed, exception:" error)
-      (if (= status 200)
-        (when (instance? InputStream body)
-          (save-byte-input-stream body dir))
-        (println "HTTP request failed, status:" status)))))
+(defn process-download-request [{:keys [status body error]} dir]
+  (if error
+    (println "Failed, exception:" error)
+    (if (= status 200)
+      (when (instance? InputStream body)
+        (save-byte-input-stream body dir))
+      (println "HTTP request failed, status:" status))))
 
 (comment
-  (def dl-info
-    (get-download-links (create-data-string :futures :cm :daily :none :trades "BTCUSD_PERP") true))
+  (def sol-info
+    (get-download-links (create-data-string :futures :cm :daily :none :book-ticker "SOLUSD_PERP") true))
 
-  (let [links (take-last 5 dl-info)
-        dir "src/data/btcusd-perp"
-        link-stream (-> links
-                        s/->source)]
-    (s/consume-async (fn [link]
-                       (d/chain'
-                         link
-                         create-download-link
-                         (fn [url]
-                           (try
-                             (do
-                               (.submit executor (fn []
-                                                   (let [resp @(get-as-byte-input-stream url)]
-                                                     (process-download-request resp dir))))
-                               true)
-                             (catch Exception e
-                               false)))))
-                     link-stream)))
+  (let [link-stream (s/->source sol-info)
+        dir "src/data/solusd-perp/tickers"]
+    (s/consume-async
+      (fn [link]
+        (d/chain'
+          link
+          create-download-link
+          (fn [url]
+            (try
+              (do
+                (.submit executor
+                         (fn []
+                           (let [resp @(get-as-byte-input-stream url)]
+                             (process-download-request resp dir))))
+                true)
+              (catch Exception e
+                false)))))
+      link-stream)))

@@ -1,7 +1,9 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.11.3"}
         org.clojure/data.zip {:mvn/version "1.1.0"}
+        amazonica/amazonica {:mvn/version "0.3.167"}
         org.scicloj/clay {:mvn/version "2-beta12"}
+        com.taoensso/nippy {:mvn/version "3.4.2"}
         io.github.clojure/tools.build {:mvn/version "0.10.3"}
         techascent/tech.ml.dataset {:mvn/version "7.030"}
         aleph/aleph {:mvn/version "0.8.1"}
@@ -12,4 +14,5 @@
         org.apache.arrow/arrow-vector {:mvn/version "6.0.0"}
         org.lz4/lz4-java {:mvn/version "1.8.0"}
         net.java.dev.jna/jna {:mvn/version "5.10.0"}
-        com.github.luben/zstd-jni {:mvn/version "1.5.4-1"}}}
+        com.github.luben/zstd-jni {:mvn/version "1.5.4-1"}
+        io.airlift/aircompressor {:mvn/version "0.27"}}}
