@@ -1,23 +1,19 @@
 (ns exchange.hyperliquid-historical
-  (:require [byte-streams :as bs]
+  (:require [amazonica.aws.s3 :as s3]
+            [amazonica.core :as core]
+            [byte-streams :as bs]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [manifold.stream :as s]
-            [manifold.deferred :as d]
-            [amazonica.aws.s3 :as s3]
-            [amazonica.core :as core]
-            [exchange.binance-historical :refer [is-dir? create-dir]])
-  (:import (java.io BufferedWriter ByteArrayInputStream DataInputStream)
-           (java.nio ByteBuffer ByteOrder CharBuffer)
-           (java.nio.channels FileChannel)
+            [exchange.binance-historical :refer [create-dir is-dir?]]
+            [manifold.stream :as s])
+  (:import (java.nio ByteBuffer)
            (java.nio.charset StandardCharsets)
-           (java.nio.file Files LinkOption OpenOption Path Paths StandardOpenOption StandardCopyOption)
+           (java.nio.file FileVisitOption FileVisitResult Files Path Paths SimpleFileVisitor StandardOpenOption)
            (java.time LocalDate LocalDateTime)
            (java.time.format DateTimeFormatter)
            (java.time.temporal ChronoUnit)
            (java.util.concurrent Executors)
-           (net.jpountz.lz4 LZ4Factory LZ4SafeDecompressor LZ4FrameInputStream)
-           (com.amazonaws.services.s3.model S3ObjectInputStream)))
+           (net.jpountz.lz4 LZ4FrameInputStream)))
 
 (def bucket-name "hyperliquid-archive")
 
@@ -27,6 +23,12 @@
 (defonce aws-secret-access-key (System/getenv "AWS_SECRET_ACCESS_KEY"))
 
 (defonce yyyyMMDD-formatter (DateTimeFormatter/ofPattern "yyyyMMdd"))
+(defonce yyyyMM-formatter (DateTimeFormatter/ofPattern "yyyyMM"))
+
+(defn date->date-month-name
+  [date name]
+  (let [formatted (.format date yyyyMM-formatter)]
+    (str formatted "-" name)))
 
 (defn ->datatype
   "Reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions"
@@ -107,30 +109,59 @@
         (.close writer)
         (.close fis)))))
 
-(comment
-  (def start-date (LocalDateTime/of 2024 1 1 0 0))
-  (def end-date (LocalDateTime/of 2024 1 15 0 0))
+(defn dir-file->date-time [path-string]
+  "Converts a path string to a LocalDateTime.
+   Expected format: .../yyyyMMdd/X-HH"
+  (when-let [[date-part hour-part] (take-last 2 (str/split path-string #"/"))]
+    (let [[_ hour] (str/split hour-part #"-")
+          padded-hour (format "%02d" (Integer/parseInt hour))
+          formatter (DateTimeFormatter/ofPattern "yyyyMMddHH")
+          date-time-str (str date-part padded-hour)]
+      (LocalDateTime/parse date-time-str formatter))))
 
-  (let [dates (make-date-time-list "2024-01-01" "2024-04-01")
+(defn lookback-find-files [dir]
+  (let [res (atom {})]
+    (Files/walkFileTree
+      (Path/of dir (into-array String []))
+      (set [FileVisitOption/FOLLOW_LINKS])
+      Integer/MAX_VALUE
+      (proxy [SimpleFileVisitor] []
+        (visitFile [path _]
+          (try
+            (let [path-str (.toString path)]
+              (swap! res assoc path-str (dir-file->date-time path-str)))
+            (catch Exception e
+              nil))
+          FileVisitResult/CONTINUE)))
+    @res))
+
+(comment
+  (let [dates (make-date-time-list "2024-01-01" "2024-12-31")
         dates-stream (s/->source dates)
         dir "src/data/"
-        asset "SOL"
+        downloaded-files (lookback-find-files dir)
+        downloaded-files-dates (map second downloaded-files)
+        asset "BTC"
         datatype :l2-book]
     (s/consume-async
       (fn [d]
         (let [key (date-time->object-name d datatype asset)
               {:keys [date hour]} (date-time->components d)
-              out-file (str dir date "/" (str/join "-" [asset hour]))]
+              year-mon-dir (date->date-month-name d asset)
+              out-file (str dir
+                            year-mon-dir "/"
+                            date "/" (str/join "-" [asset hour]))]
           (try
-            (do
-              (if-not (is-dir? (str dir date))
-                (create-dir (str dir date)))
+            (when-not (is-dir? (str dir year-mon-dir "/" date))
+              (create-dir (str dir year-mon-dir "/" date))
+            (when (->> downloaded-files-dates
+                       (filter #(.equals (first dates))))
               (.submit executor
                        (fn []
                          (let [s3-obj (get-s3-object bucket-name key)
                                input-stream (s3-object->input-stream s3-obj)]
-                           (lz4-input-stream->write input-stream out-file))))
-              true)
+                           (lz4-input-stream->write input-stream out-file)))))
+            true
             (catch Exception _
               false))))
-      dates-stream)))
+      dates-stream))))
